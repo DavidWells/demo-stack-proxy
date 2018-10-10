@@ -1,0 +1,13 @@
+---
+Type: "AWS::DynamoDB::Table"
+Properties:
+  TableName: ${self:custom.stackname}-originmap
+  AttributeDefinitions:
+    - AttributeName: Host
+      AttributeType: S
+  KeySchema:
+    - AttributeName: Host
+      KeyType: HASH
+  ProvisionedThroughput:
+    ReadCapacityUnits: 300
+    WriteCapacityUnits: 5

@@ -1,0 +1,165 @@
+service: demo-stack-proxy
+
+frameworkVersion: ">=1.9.0 <2.0.0"
+
+custom:
+  stage: ${opt:stage, self:provider.stage}
+  stackname: ${self:service}-${self:custom.stage}
+  tablePrefix: '${self:custom.stackname}-*'
+  apexdomain: klickstuff.com
+  githubWebhookName: ${self:custom.stackname}-githubWebhook
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: nodejs8.10
+
+functions:
+  viewerRequest:
+    handler: functions/proxy/handler.viewerRequestHandler
+    memorySize: 128
+    timeout: 5
+    role: ViewerRequestRole
+    lambdaAtEdge:
+      distribution: WebsiteDistribution
+      eventType: viewer-request
+    package:
+      include:
+        - functions/proxy/**/*
+  originRequest:
+    handler: functions/proxy/handler.originRequestHandler
+    memorySize: 128
+    timeout: 5
+    lambdaAtEdge:
+      distribution: WebsiteDistribution
+      eventType: origin-request
+    package:
+      include:
+        - functions/proxy/**/*
+  githubWebhook:
+    name: ${self:custom.githubWebhookName}
+    handler: functions/githubWebhook/handler.webhookHandler
+    memorySize: 128
+    timeout: 5
+    role: GithubWebhookRole
+    events:
+      - http:
+          path: webhook
+          method: post
+          cors: true
+    environment:
+      GITHUB_WEBHOOK_SECRET: ${ssm:demo-stack-proxy-ghwebhooksecret} #Dont do this 
+      GITHUB_ACCESS_TOKEN: ${ssm:demo-github-token} #Dont do this 
+      CI_ROLE_ARN: "arn:aws:iam::104477223281:role/demo-ci-deployer-role"
+    package:
+      include:
+        - functions/githubWebhook/**/*
+
+resources:
+  Resources:
+    SSLCert:
+      Type: "AWS::CertificateManager::Certificate"
+      Properties:
+        DomainName: "*.${self:custom.apexdomain}"
+    OriginMapTBL: ${file(resources/database/originmap-tbl.yml)}
+    ViewerRequestRole: ${file(resources/role/viewerrequest-role.yml)}
+    GithubWebhookRole: ${file(resources/role/githubwebhook-role.yml)}
+    CloudfrontOAI:
+      Type: "AWS::CloudFront::CloudFrontOriginAccessIdentity"
+      Properties:
+        CloudFrontOriginAccessIdentityConfig:
+          Comment: Created for ${self:custom.stackname} 
+    DefaultBucket:
+      Type: "AWS::S3::Bucket"
+      Properties:
+        AccessControl: Private
+        # AccelerateConfiguration:
+    BucketPolicy:
+      Type: "AWS::S3::BucketPolicy"
+      Properties:
+        Bucket: {Ref: DefaultBucket}
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            Effect: Allow
+            Principal:
+              CanonicalUser:
+                - {"Fn::GetAtt": [CloudfrontOAI, S3CanonicalUserId]}
+            Action:
+              - s3:ListBucket
+              - s3:GetObject
+            Resource:
+              - {"Fn::Join": ["", ["arn:aws:s3:::", {Ref: DefaultBucket}]]}
+              - {"Fn::Join": ["", ["arn:aws:s3:::", {Ref: DefaultBucket}, "/*"]]}
+    WebsiteDistribution:
+      Type: "AWS::CloudFront::Distribution"
+      Properties:
+        DistributionConfig:
+          Aliases: 
+            - "*.${self:custom.apexdomain}"
+          ViewerCertificate:
+            AcmCertificateArn: {Ref: SSLCert}
+            SslSupportMethod: sni-only
+          # WebACLId: {"Fn::ImportValue": "wafacl-prod"}
+          Enabled: true
+          HttpVersion: http2
+          PriceClass: PriceClass_100
+          IPV6Enabled: true
+          DefaultCacheBehavior:
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            ForwardedValues:
+              QueryString: false
+              Cookies:
+                Forward: none
+            DefaultTTL: 0
+            MaxTTL: 0
+            MinTTL: 0
+            # PathPattern: String
+            # SmoothStreaming: Boolean
+            TargetOriginId: WebsiteBucketOrigin
+            # TrustedSigners:
+            #   - String
+            ViewerProtocolPolicy: redirect-to-https
+          Origins:
+            - DomainName: {"Fn::GetAtt": [DefaultBucket, DomainName]}
+              Id: WebsiteBucketOrigin
+              S3OriginConfig:
+                OriginAccessIdentity: {"Fn::Join": ["", ["origin-access-identity/cloudfront/", {Ref: CloudfrontOAI}]]}
+    DnsRecords:
+      Type: "AWS::Route53::RecordSetGroup"
+      Properties:
+        HostedZoneName: ${self:custom.apexdomain}.
+        Comment: "DNS records associated with ${self:custom.stackname}"
+        RecordSets:
+          - Name: "*.${self:custom.apexdomain}"
+            Type: A
+            AliasTarget:
+              DNSName:  {"Fn::GetAtt": WebsiteDistribution.DomainName}
+              HostedZoneId: Z2FDTNDATAQYW2
+
+  Outputs:
+    OriginMapTBL:
+      Description: Proxy DynamoDB Origin Mapping Table
+      Value: {Ref: OriginMapTBL}
+      Export:
+        Name: "${self:custom.stackname}-OriginMapTBL"
+    CloudfrontOAI:
+      Description: Proxy CloudFront Origin Access Identity S3CanonicalUserId
+      Value: {"Fn::GetAtt": [CloudfrontOAI, S3CanonicalUserId]}
+      Export:
+        Name: "${self:custom.stackname}-S3CanonicalUserId"
+
+plugins:
+  - serverless-plugin-cloudfront-lambda-edge
+  - serverless-print-dots
+
+package:
+  individually: true
+  exclude:
+    - '**/*'
